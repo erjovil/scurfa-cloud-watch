@@ -39,7 +39,8 @@ jobs:
           gh issue create \
             --title "✅ TEST — Scurfa alert path works" \
             --label alert-test \
-            --body "If this arrived in your inbox, the real drop alert will too.
+            --assignee "${{ github.repository_owner }}" \
+            --body "@${{ github.repository_owner }} If this arrived in your inbox, the real drop alert will too.
 
           Safe to close. This uses a separate label, so it does not suppress a genuine in-stock alert."
           echo "Test alert sent — check your email."
@@ -81,8 +82,9 @@ jobs:
           gh issue create \
             --title "🚨 SCURFA M.S.26 IS IN STOCK — $NAMES" \
             --label in-stock \
+            --assignee "${{ github.repository_owner }}" \
             --body "$(printf '%s\n\n%s\n\n%s\n' \
-                "The M.S.26 just became available. Limited to 150 pieces — go now." \
+                "@${{ github.repository_owner }} The M.S.26 just became available. Limited to 150 pieces — go now." \
                 "$DETAIL" \
                 "Detected $(date -u '+%Y-%m-%d %H:%M UTC'). Close this issue to re-arm the alert.")"
 
@@ -108,7 +110,8 @@ jobs:
           gh issue create \
             --title "⚠️ Scurfa watcher can't reach the site" \
             --label monitor-blind \
-            --body "Every fetch failed. The site may have been redesigned, moved, or started blocking us.
+            --assignee "${{ github.repository_owner }}" \
+            --body "@${{ github.repository_owner }} Every fetch failed. The site may have been redesigned, moved, or started blocking us.
 
           **The watcher is not currently protecting you.** Check the Actions log, then close this issue once it's fixed.
 
