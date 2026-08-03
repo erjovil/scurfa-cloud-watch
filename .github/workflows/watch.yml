@@ -1,0 +1,140 @@
+name: Scurfa M.S.26 stock watch
+
+on:
+  schedule:
+    # Every 5 minutes. GitHub's scheduler drifts and can queue runs late, so
+    # each run loops internally at ~60s intervals to cover its whole window.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:        # lets you run it on demand from the Actions tab
+    inputs:
+      test_alert:
+        description: "Fire a fake alert to prove the email path works end to end"
+        type: boolean
+        default: false
+
+permissions:
+  issues: write             # to open the alert issue -> the email you receive
+  contents: write           # to write the daily heartbeat (keeps cron alive)
+
+concurrency:
+  group: scurfa-watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # Proves the whole alert chain (permissions -> issue -> email) without
+      # waiting for a real drop. Uses its own label so it can never satisfy the
+      # in-stock dedupe and mute the alert that actually matters.
+      - name: Send a test alert
+        if: ${{ inputs.test_alert }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create alert-test --color 0E8A16 --description "End-to-end alert test" 2>/dev/null || true
+          gh issue create \
+            --title "✅ TEST — Scurfa alert path works" \
+            --label alert-test \
+            --body "If this arrived in your inbox, the real drop alert will too.
+
+          Safe to close. This uses a separate label, so it does not suppress a genuine in-stock alert."
+          echo "Test alert sent — check your email."
+
+      - uses: actions/setup-python@v5
+        if: ${{ !inputs.test_alert }}
+        with:
+          python-version: "3.11"
+
+      - name: Check stock
+        id: check
+        if: ${{ !inputs.test_alert }}
+        env:
+          PASSES: "5"         # 5 checks per run...
+          GAP_SECONDS: "55"   # ...roughly one a minute
+        run: |
+          set +e
+          python check_stock.py
+          code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Raise the alarm
+        if: steps.check.outputs.in_stock == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAMES: ${{ steps.check.outputs.names }}
+          DETAIL: ${{ steps.check.outputs.body }}
+        run: |
+          gh label create in-stock --color B60205 --description "M.S.26 availability alert" 2>/dev/null || true
+
+          # Only alert once per drop, so you get one email rather than one every 5 minutes.
+          open_alerts=$(gh issue list --label in-stock --state open --json number --jq 'length')
+          if [ "$open_alerts" -gt 0 ]; then
+            echo "An alert issue is already open — not sending a duplicate."
+            exit 0
+          fi
+
+          gh issue create \
+            --title "🚨 SCURFA M.S.26 IS IN STOCK — $NAMES" \
+            --label in-stock \
+            --body "$(printf '%s\n\n%s\n\n%s\n' \
+                "The M.S.26 just became available. Limited to 150 pieces — go now." \
+                "$DETAIL" \
+                "Detected $(date -u '+%Y-%m-%d %H:%M UTC'). Close this issue to re-arm the alert.")"
+
+          echo "Issue created. Failing the job on purpose so GitHub sends a second email."
+          exit 1
+
+      # Deliberately does NOT fail the job. Failing here would email you on every
+      # single run for as long as the outage lasted — ~288 emails/day. One issue,
+      # one email, then quiet until it recovers.
+      - name: Report a blind monitor (once)
+        if: steps.check.outputs.code == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create monitor-blind --color D93F0B --description "Watcher cannot reach the site" 2>/dev/null || true
+
+          already=$(gh issue list --label monitor-blind --state open --json number --jq 'length')
+          if [ "$already" -gt 0 ]; then
+            echo "Already reported — staying quiet."
+            exit 0
+          fi
+
+          gh issue create \
+            --title "⚠️ Scurfa watcher can't reach the site" \
+            --label monitor-blind \
+            --body "Every fetch failed. The site may have been redesigned, moved, or started blocking us.
+
+          **The watcher is not currently protecting you.** Check the Actions log, then close this issue once it's fixed.
+
+          It closes itself automatically if fetches start working again."
+
+      - name: Clear the blind flag on recovery
+        if: steps.check.outputs.code == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for n in $(gh issue list --label monitor-blind --state open --json number --jq '.[].number'); do
+            gh issue close "$n" --comment "Fetches are working again — watcher recovered."
+          done
+
+      # GitHub disables scheduled workflows after 60 days without repo activity.
+      # Storing only the DATE means exactly one commit per day, which is enough.
+      - name: Daily heartbeat
+        if: always()
+        run: |
+          date -u '+%Y-%m-%d' > last_seen.txt
+          git add last_seen.txt
+          # Compare the INDEX to HEAD, not the worktree: on the first run the file
+          # is untracked, and `git diff` ignores untracked files entirely.
+          if ! git diff --cached --quiet -- last_seen.txt; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "heartbeat: $(cat last_seen.txt)"
+            git push origin HEAD:${{ github.ref_name }}
+          fi
