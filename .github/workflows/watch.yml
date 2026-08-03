@@ -130,6 +130,9 @@ jobs:
       # Storing only the DATE means exactly one commit per day, which is enough.
       - name: Daily heartbeat
         if: always()
+        # Never let a housekeeping commit fail the run. A red run here would be
+        # pure noise, and worse, it trains you to ignore red runs.
+        continue-on-error: true
         run: |
           date -u '+%Y-%m-%d' > last_seen.txt
           git add last_seen.txt
@@ -139,5 +142,9 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git commit -m "heartbeat: $(cat last_seen.txt)"
-            git push origin HEAD:${{ github.ref_name }}
+            # The branch may have moved while this run was in flight (your own
+            # push, or an overlapping run). Rebase on top rather than rejecting.
+            git pull --rebase --autostash origin ${{ github.ref_name }} || true
+            git push origin HEAD:${{ github.ref_name }} \
+              || echo "Heartbeat push skipped — branch moved on. Harmless; tomorrow's run retries."
           fi
