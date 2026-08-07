@@ -23,7 +23,11 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Each run polls for ~5.5h. GitHub silently drops most `schedule` triggers
+    # on free tier -- measured cadence was ~2.5h, not the 5 min the cron asks
+    # for. A run lasting longer than the gap between triggers means one is
+    # essentially always active, so coverage no longer depends on cron firing.
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
 
@@ -54,8 +58,9 @@ jobs:
         id: check
         if: ${{ !inputs.test_alert }}
         env:
-          PASSES: "5"         # 5 checks per run...
-          GAP_SECONDS: "55"   # ...roughly one a minute
+          PASSES: "330"        # 330 checks...
+          GAP_SECONDS: "60"    # ...one a minute = ~5.5h of continuous cover
+          INDEX_EVERY: "10"    # sweep shop pages every 10th pass, not every one
         run: |
           set +e
           python check_stock.py

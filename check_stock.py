@@ -148,8 +148,14 @@ def scan_index(html, known_urls):
     return sorted(u for u in found if u not in known_urls)
 
 
-def one_pass():
-    """One sweep of every product + index page. Returns (hits, fetched_ok)."""
+def one_pass(scan_indexes=True):
+    """
+    One sweep of the product pages. Returns (hits, fetched_ok).
+
+    `scan_indexes` is throttled by the caller: a new variant appearing is a
+    slow-moving event, so sweeping the shop pages every ~10 minutes instead of
+    every minute keeps request volume civil against a small business's site.
+    """
     hits = []
     fetched_ok = 0
 
@@ -167,7 +173,7 @@ def one_pass():
             log("  %-6s not yet — %s" % (product["key"], detail))
 
     known = set(p["url"] for p in PRODUCTS)
-    for index_url in INDEX_PAGES:
+    for index_url in (INDEX_PAGES if scan_indexes else []):
         html, _ = fetch(index_url)
         if html is None:
             continue
@@ -202,10 +208,12 @@ def main():
     passes = int(os.environ.get("PASSES", "5"))
     gap = int(os.environ.get("GAP_SECONDS", "55"))
 
+    index_every = int(os.environ.get("INDEX_EVERY", "10"))
+
     total_ok = 0
     for i in range(passes):
         log("pass %d/%d" % (i + 1, passes))
-        hits, ok = one_pass()
+        hits, ok = one_pass(scan_indexes=(i % index_every == 0))
         total_ok += ok
         if hits:
             emit_output(hits)
