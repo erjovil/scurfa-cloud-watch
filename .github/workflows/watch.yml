@@ -74,27 +74,39 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           NAMES: ${{ steps.check.outputs.names }}
           DETAIL: ${{ steps.check.outputs.body }}
+          KEYS: ${{ steps.check.outputs.keys }}
         run: |
-          gh label create in-stock --color B60205 --description "M.S.26 availability alert" 2>/dev/null || true
+          # Dedupe is PER VARIANT. A single shared flag previously meant an
+          # unclosed alert for one colour silently swallowed a real drop of the
+          # other -- which is exactly how the 16 Aug blue release was missed.
+          created=0
+          IFS=',' read -ra KEY_LIST <<< "$KEYS"
+          for k in "${KEY_LIST[@]}"; do
+            [ -z "$k" ] && continue
+            label="in-stock-$k"
+            gh label create "$label" --color B60205 --description "M.S.26 $k availability" 2>/dev/null || true
 
-          # Only alert once per drop, so you get one email rather than one every 5 minutes.
-          open_alerts=$(gh issue list --label in-stock --state open --json number --jq 'length')
-          if [ "$open_alerts" -gt 0 ]; then
-            echo "An alert issue is already open — not sending a duplicate."
-            exit 0
+            open_alerts=$(gh issue list --label "$label" --state open --json number --jq 'length')
+            if [ "$open_alerts" -gt 0 ]; then
+              echo "Alert already open for '$k' — not duplicating."
+              continue
+            fi
+
+            gh issue create \
+              --title "🚨 SCURFA M.S.26 IS IN STOCK — $NAMES" \
+              --label "$label" \
+              --assignee "${{ github.repository_owner }}" \
+              --body "$(printf '%s\n\n%s\n\n%s\n' \
+                  "@${{ github.repository_owner }} The M.S.26 just became available. Limited to 150 pieces — go now." \
+                  "$DETAIL" \
+                  "Detected $(date -u '+%Y-%m-%d %H:%M UTC'). Re-arms automatically when it goes back out of stock.")"
+            created=1
+          done
+
+          if [ "$created" = "1" ]; then
+            echo "Issue created. Failing the job on purpose so GitHub sends a second email."
+            exit 1
           fi
-
-          gh issue create \
-            --title "🚨 SCURFA M.S.26 IS IN STOCK — $NAMES" \
-            --label in-stock \
-            --assignee "${{ github.repository_owner }}" \
-            --body "$(printf '%s\n\n%s\n\n%s\n' \
-                "@${{ github.repository_owner }} The M.S.26 just became available. Limited to 150 pieces — go now." \
-                "$DETAIL" \
-                "Detected $(date -u '+%Y-%m-%d %H:%M UTC'). Close this issue to re-arm the alert.")"
-
-          echo "Issue created. Failing the job on purpose so GitHub sends a second email."
-          exit 1
 
       # Deliberately does NOT fail the job. Failing here would email you on every
       # single run for as long as the outage lasted — ~288 emails/day. One issue,
@@ -121,6 +133,24 @@ jobs:
           **The watcher is not currently protecting you.** Check the Actions log, then close this issue once it's fixed.
 
           It closes itself automatically if fetches start working again."
+
+      # Re-arm without human intervention. Requiring a manual issue close made a
+      # permanent silent mute the default state -- the worst possible failure
+      # mode for a monitor, because nothing looks wrong while it is deaf.
+      - name: Re-arm variants that are out of stock again
+        if: ${{ steps.check.outputs.oos_keys != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OOS_KEYS: ${{ steps.check.outputs.oos_keys }}
+        run: |
+          IFS=',' read -ra OOS <<< "$OOS_KEYS"
+          for k in "${OOS[@]}"; do
+            [ -z "$k" ] && continue
+            for n in $(gh issue list --label "in-stock-$k" --state open --json number --jq '.[].number'); do
+              echo "Closing stale alert #$n for '$k' — back to out of stock."
+              gh issue close "$n" --comment "Back to out of stock. Alert re-armed automatically."
+            done
+          done
 
       - name: Clear the blind flag on recovery
         if: steps.check.outputs.code == '0'

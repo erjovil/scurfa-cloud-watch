@@ -157,6 +157,7 @@ def one_pass(scan_indexes=True):
     every minute keeps request volume civil against a small business's site.
     """
     hits = []
+    oos_keys = []
     fetched_ok = 0
 
     for product in PRODUCTS:
@@ -168,8 +169,11 @@ def one_pass(scan_indexes=True):
         available, signals, detail = check_page(html)
         if available:
             log("  %-6s *** IN STOCK *** %s" % (product["key"], "; ".join(signals)))
-            hits.append({"name": product["name"], "url": product["url"], "signals": signals})
+            hits.append({"key": product["key"], "name": product["name"],
+                         "url": product["url"], "signals": signals})
         else:
+            # Reported so the workflow can auto-close a stale alert and re-arm.
+            oos_keys.append(product["key"])
             log("  %-6s not yet — %s" % (product["key"], detail))
 
     known = set(p["url"] for p in PRODUCTS)
@@ -180,24 +184,33 @@ def one_pass(scan_indexes=True):
         fetched_ok += 1
         for new_url in scan_index(html, known):
             known.add(new_url)
+            slug = new_url.rstrip("/").rsplit("/", 1)[-1][:40]
             log("  *** NEW M.S.26 LISTING *** %s" % new_url)
-            hits.append({"name": "NEW M.S.26 listing", "url": new_url,
+            hits.append({"key": "new-" + slug, "name": "NEW M.S.26 listing", "url": new_url,
                          "signals": ["appeared on the shop/limited-edition page"]})
 
-    return hits, fetched_ok
+    return hits, fetched_ok, oos_keys
 
 
-def emit_output(hits):
-    """Hand the result to the workflow via GITHUB_OUTPUT."""
+def emit_output(hits, oos_keys):
+    """
+    Hand the result to the workflow via GITHUB_OUTPUT.
+
+    `keys` drives PER-VARIANT alert dedupe and `oos_keys` drives automatic
+    re-arming. Both exist because a single global "already alerted" flag once
+    let a stale alert for one variant silently swallow a real drop of another.
+    """
     path = os.environ.get("GITHUB_OUTPUT")
     if not path:
         return
-    lines = ["in_stock=%s" % ("true" if hits else "false")]
+    lines = ["in_stock=%s" % ("true" if hits else "false"),
+             "oos_keys=%s" % ",".join(oos_keys)]
     if hits:
         body = "\n".join(
             "- **%s**\n  %s\n  detected via: %s" % (h["name"], h["url"], "; ".join(h["signals"]))
             for h in hits
         )
+        lines.append("keys=%s" % ",".join(h["key"] for h in hits))
         lines.append("names=%s" % ", ".join(h["name"] for h in hits))
         lines.append("body<<EOF_BODY\n%s\nEOF_BODY" % body)
     with open(path, "a", encoding="utf-8") as fh:
@@ -211,18 +224,20 @@ def main():
     index_every = int(os.environ.get("INDEX_EVERY", "10"))
 
     total_ok = 0
+    last_oos = []
     for i in range(passes):
         log("pass %d/%d" % (i + 1, passes))
-        hits, ok = one_pass(scan_indexes=(i % index_every == 0))
+        hits, ok, oos_keys = one_pass(scan_indexes=(i % index_every == 0))
         total_ok += ok
+        last_oos = oos_keys
         if hits:
-            emit_output(hits)
+            emit_output(hits, oos_keys)
             log("HIT — stopping early so the workflow can raise the alarm.")
             return 7
         if i < passes - 1:
             time.sleep(gap)
 
-    emit_output([])
+    emit_output([], last_oos)
     if total_ok == 0:
         log("ERROR: every fetch failed across all passes — the monitor is blind.")
         return 1
